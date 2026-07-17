@@ -1,0 +1,51 @@
+name: Poker 5-10 Monitor
+
+on:
+  schedule:
+    # Cron in UTC. Acopera 19:45-05:00 ora Spaniei (vara UTC+2, iarna UTC+1).
+    # Scriptul verifica singur fereastra exacta si iese daca e in afara ei.
+    - cron: '*/15 17-23 * * *'
+    - cron: '*/15 0-4 * * *'
+  workflow_dispatch: {}   # permite rulare manuala pentru test
+
+permissions:
+  contents: write
+
+concurrency:
+  group: poker-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet playwright requests
+          playwright install --with-deps chromium
+
+      - name: Run monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_MODE: changes   # schimba in "always" daca vrei mesaj la fiecare 15 min cat e masa deschisa
+        run: python monitor.py
+
+      - name: Save state
+        run: |
+          git config user.name "poker-monitor-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "update state [skip ci]"
+            git push
+          fi
