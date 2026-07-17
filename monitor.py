@@ -18,6 +18,8 @@ from playwright.sync_api import sync_playwright
 
 URL = "https://www.casinobarcelona.com/poker-cash"
 MIN_BIG_BLIND = 10.0          # 5/10 sau mai mare (dupa big blind)
+WAITLIST_THRESHOLD = 5        # notifica si daca masa e inchisa dar lista >= 5
+LOW_STAKES_TABLE_TRIGGER = 5  # 2/5: notifica doar daca sunt cel putin 5 mese (anormal)
 STATE_FILE = "state.json"
 TZ = ZoneInfo("Europe/Madrid")
 
@@ -154,41 +156,95 @@ def main() -> None:
         return
 
     big_rows = [r for r in rows if r["bb"] >= MIN_BIG_BLIND]
+    low_rows = [r for r in rows if r["bb"] < MIN_BIG_BLIND]   # ex. 2/5
     open_rows = [r for r in big_rows if r["mesas"] >= 1]
-    print(f"[i] Randuri Texas gasite: {len(rows)}; 5/10+: {len(big_rows)}; deschise: {len(open_rows)}")
-    for r in big_rows:
+    # Mese inchise, dar cu lista de asteptare la prag -> semnal ca se deschide curand
+    waiting_rows = [
+        r for r in big_rows if r["mesas"] == 0 and r["lista"] >= WAITLIST_THRESHOLD
+    ]
+    # 2/5: trigger doar in situatie anormala (numar mare de mese)
+    abnormal_low_rows = [
+        r for r in low_rows if r["mesas"] >= LOW_STAKES_TABLE_TRIGGER
+    ]
+    alert_rows = open_rows + waiting_rows + abnormal_low_rows
+    print(
+        f"[i] Randuri Texas: {len(rows)}; 5/10+: {len(big_rows)}; "
+        f"deschise: {len(open_rows)}; in prag de deschidere: {len(waiting_rows)}; "
+        f"2/5 anormal: {len(abnormal_low_rows)}"
+    )
+    for r in rows:
         print(f"    {r['section']} | {r['blinds']} | mese={r['mesas']} lista={r['lista']}")
 
-    # Semnatura include si lista de asteptare: orice modificare (mese SAU lista)
-    # declanseaza notificare; daca nimic nu s-a schimbat, nu se trimite nimic.
+    # Semnatura include mesele si lista de asteptare pentru toate randurile
+    # relevante (deschise SAU inchise cu lista >= prag). Orice modificare
+    # (ex. lista trece de la 5 la 6) declanseaza notificare; daca nimic
+    # nu s-a schimbat, nu se trimite nimic.
     signature = sorted(
-        f"{r['section']}|{r['blinds']}|{r['mesas']}|{r['lista']}" for r in open_rows
+        f"{r['section']}|{r['blinds']}|{r['mesas']}|{r['lista']}" for r in alert_rows
     )
     prev_signature = state.get("open", [])
 
     def format_rows(rs):
-        return "\n".join(
-            f"• {r['section']} — {r['blinds']}: {r['mesas']} masa/mese, "
-            f"lista de asteptare: {r['lista']}"
-            for r in rs
+        lines = []
+        for r in rs:
+            if r["bb"] < MIN_BIG_BLIND:
+                lines.append(
+                    f"🔥 {r['section']} — {r['blinds']}: {r['mesas']} mese deschise "
+                    f"(neobisnuit de multe), lista de asteptare: {r['lista']}"
+                )
+            elif r["mesas"] >= 1:
+                lines.append(
+                    f"• {r['section']} — {r['blinds']}: {r['mesas']} masa/mese "
+                    f"DESCHISE, lista de asteptare: {r['lista']}"
+                )
+            else:
+                lines.append(
+                    f"⏳ {r['section']} — {r['blinds']}: inca inchisa, dar "
+                    f"{r['lista']} oameni pe lista — probabil se deschide curand"
+                )
+        return "\n".join(lines)
+
+    def low_stakes_context():
+        """Starea 2/5, atasata oricarei notificari, indiferent de numarul de mese."""
+        if not low_rows:
+            return ""
+        info = "\n".join(
+            f"  {r['blinds']}: {r['mesas']} mese, lista: {r['lista']}"
+            for r in low_rows
         )
+        return f"\nℹ️ Context 2/5:\n{info}"
 
     if IS_MANUAL_RUN:
-        if open_rows:
-            send_telegram(f"✅ Test OK ({stamp})\nMese 5/10+ deschise acum:\n{format_rows(open_rows)}")
-        elif big_rows:
-            send_telegram(f"✅ Test OK ({stamp})\nNicio masa 5/10+ deschisa acum.\n{format_rows(big_rows)}")
+        if alert_rows:
+            send_telegram(
+                f"✅ Test OK ({stamp})\nStare mese:\n{format_rows(alert_rows)}"
+                f"{low_stakes_context()}"
+            )
+        elif big_rows or low_rows:
+            send_telegram(
+                f"✅ Test OK ({stamp})\nNimic de semnalat (mese 5/10+ inchise, "
+                f"liste sub prag).\n{format_rows(big_rows)}{low_stakes_context()}"
+            )
         else:
-            send_telegram(f"✅ Test OK ({stamp})\nNu am gasit randuri 5/10+ in tabelul Texas (posibil pagina goala).")
+            send_telegram(f"✅ Test OK ({stamp})\nNu am gasit randuri in tabelul Texas (posibil pagina goala).")
     else:
-        if open_rows and (NOTIFY_MODE == "always" or signature != prev_signature):
-            if not prev_signature:
+        if alert_rows and (NOTIFY_MODE == "always" or signature != prev_signature):
+            if open_rows and not prev_signature:
                 header = "🎰 S-a deschis masa Texas 5/10+ la Casino Barcelona!"
+            elif open_rows:
+                header = "🔄 Update mese Texas 5/10+:"
+            elif waiting_rows:
+                header = "⏳ Miscare pe lista de asteptare Texas 5/10+:"
             else:
-                header = "🔄 Update mese Texas 5/10+ (mese sau lista de asteptare):"
-            send_telegram(f"{header} ({stamp})\n{format_rows(open_rows)}")
-        elif not open_rows and prev_signature:
-            send_telegram(f"❌ Nu mai e nicio masa Texas 5/10+ deschisa. ({stamp})")
+                header = "🔥 Actiune neobisnuita la 2/5:"
+            send_telegram(
+                f"{header} ({stamp})\n{format_rows(alert_rows)}{low_stakes_context()}"
+            )
+        elif not alert_rows and prev_signature:
+            send_telegram(
+                f"❌ Nicio masa Texas 5/10+ deschisa si listele au scazut sub "
+                f"{WAITLIST_THRESHOLD}. ({stamp}){low_stakes_context()}"
+            )
 
     state["open"] = signature
     state["festival"] = False
