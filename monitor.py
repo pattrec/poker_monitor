@@ -184,67 +184,46 @@ def main() -> None:
     )
     prev_signature = state.get("open", [])
 
-    def format_rows(rs):
-        lines = []
-        for r in rs:
-            if r["bb"] < MIN_BIG_BLIND:
-                lines.append(
-                    f"🔥 {r['section']} — {r['blinds']}: {r['mesas']} mese deschise "
-                    f"(neobisnuit de multe), lista de asteptare: {r['lista']}"
-                )
-            elif r["mesas"] >= 1:
-                lines.append(
-                    f"• {r['section']} — {r['blinds']}: {r['mesas']} masa/mese "
-                    f"DESCHISE, lista de asteptare: {r['lista']}"
-                )
-            else:
-                lines.append(
-                    f"⏳ {r['section']} — {r['blinds']}: inca inchisa, dar "
-                    f"{r['lista']} oameni pe lista — probabil se deschide curand"
-                )
-        return "\n".join(lines)
+    def _fmt_num(x: float) -> str:
+        return str(int(x)) if float(x) == int(x) else str(x).replace(".", ",")
 
-    def low_stakes_context():
-        """Starea 2/5, atasata oricarei notificari, indiferent de numarul de mese."""
-        if not low_rows:
+    sections = {r["section"] for r in rows}
+    multi_section = len(sections) > 1
+
+    def sec_tag(r) -> str:
+        """Numele salii apare doar daca exista mai multe sectiuni Texas."""
+        if not multi_section:
             return ""
-        info = "\n".join(
-            f"  {r['blinds']}: {r['mesas']} mese, lista: {r['lista']}"
-            for r in low_rows
-        )
-        return f"\nℹ️ Context 2/5:\n{info}"
+        t = re.sub(r"\s+", " ", r["section"].replace("|", " ")).strip()
+        t = re.sub(r"^SALA\s+", "", t, flags=re.IGNORECASE)
+        return f"{t.title()} · "
+
+    def line(r, emoji: str = "") -> str:
+        blinds = f"{_fmt_num(r['sb'])}/{_fmt_num(r['bb'])}"
+        mese = f"{r['mesas']} " + ("masa" if r["mesas"] == 1 else "mese")
+        return f"{emoji}{sec_tag(r)}{blinds} · {mese} · {r['lista']} in lista"
+
+    # Randurile de alerta, fiecare cu simbolul categoriei sale
+    body_lines = (
+        [line(r, "🎰 ") for r in open_rows]
+        + [line(r, "⏳ ") for r in waiting_rows]
+        + [line(r, "🔥 ") for r in abnormal_low_rows]
+    )
+    # Contextul 2/5 (fara emoji), doar randurile care nu sunt deja in alerta
+    context_lines = [line(r) for r in low_rows if r not in abnormal_low_rows]
 
     if IS_MANUAL_RUN:
-        if alert_rows:
-            send_telegram(
-                f"✅ Test OK ({stamp})\nStare mese:\n{format_rows(alert_rows)}"
-                f"{low_stakes_context()}"
-            )
-        elif big_rows or low_rows:
-            send_telegram(
-                f"✅ Test OK ({stamp})\nNimic de semnalat (mese 5/10+ inchise, "
-                f"liste sub prag).\n{format_rows(big_rows)}{low_stakes_context()}"
-            )
+        status_lines = [line(r) for r in low_rows + big_rows]
+        if status_lines:
+            send_telegram(f"✅ Test OK · {stamp}\n" + "\n".join(status_lines))
         else:
-            send_telegram(f"✅ Test OK ({stamp})\nNu am gasit randuri in tabelul Texas (posibil pagina goala).")
+            send_telegram(f"✅ Test OK · {stamp}\nTabel Texas gol (posibil pagina goala).")
     else:
         if alert_rows and (NOTIFY_MODE == "always" or signature != prev_signature):
-            if open_rows and not prev_signature:
-                header = "🎰 S-a deschis masa Texas 5/10+ la Casino Barcelona!"
-            elif open_rows:
-                header = "🔄 Update mese Texas 5/10+:"
-            elif waiting_rows:
-                header = "⏳ Miscare pe lista de asteptare Texas 5/10+:"
-            else:
-                header = "🔥 Actiune neobisnuita la 2/5:"
-            send_telegram(
-                f"{header} ({stamp})\n{format_rows(alert_rows)}{low_stakes_context()}"
-            )
+            send_telegram("\n".join(body_lines + context_lines) + f"\n{stamp}")
         elif not alert_rows and prev_signature:
-            send_telegram(
-                f"❌ Nicio masa Texas 5/10+ deschisa si listele au scazut sub "
-                f"{WAITLIST_THRESHOLD}. ({stamp}){low_stakes_context()}"
-            )
+            closing = [f"❌ 5/10+ inchise · liste sub {WAITLIST_THRESHOLD} · {stamp}"]
+            send_telegram("\n".join(closing + context_lines))
 
     state["open"] = signature
     state["festival"] = False
