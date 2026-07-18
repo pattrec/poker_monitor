@@ -1,9 +1,20 @@
 """
-Monitor Casino Barcelona - Poker Cash
-Verifica daca exista mese Texas Hold'em cu blinds 5/10 sau mai mari
-si trimite notificare pe Telegram.
+Monitor mese cash Texas Hold'em.
+Notificari pe Telegram, cu memorie zilnica per nivel de blinds.
+URL-ul monitorizat vine din secretul TARGET_URL (nu apare in cod).
 
-Ruleaza in GitHub Actions la ~15 minute, intre 19:45 si 05:00 (ora Spaniei).
+Reguli:
+- Ziua de poker se reseteaza la 07:00 (ora Spaniei) - casino inchis.
+- Pentru fiecare nivel (5/10, 10/20, 20/50...) se tine un "holder" cu
+  ultima stare vazuta AZI. Trigger cand:
+    * numarul de mese difera de holder (inclusiv prima deschidere azi
+      si inchiderea) -> emoji 🎰 / ❌
+    * masa inchisa (0 mese) si lista >= 5, noua sau schimbata -> ⏳
+    * 2/5: numar de mese >= 5 (anormal), nou sau schimbat -> 🔥
+- Afisarea e mereu snapshot complet, in ordinea de pe site (mic -> mare).
+- Protectie la glitch: daca site-ul arata brusc 0 mese peste tot desi azi
+  erau mese deschise, prima citire de acest fel e ignorata; doar daca se
+  repeta si la urmatoarea rulare e considerata reala.
 """
 
 import datetime
@@ -16,19 +27,27 @@ from zoneinfo import ZoneInfo
 import requests
 from playwright.sync_api import sync_playwright
 
-URL = "https://www.casinobarcelona.com/poker-cash"
+URL = os.environ.get("TARGET_URL", "").strip()
 MIN_BIG_BLIND = 10.0          # 5/10 sau mai mare (dupa big blind)
-WAITLIST_THRESHOLD = 5        # notifica si daca masa e inchisa dar lista >= 5
-LOW_STAKES_TABLE_TRIGGER = 5  # 2/5: notifica doar daca sunt cel putin 5 mese (anormal)
+WAITLIST_THRESHOLD = 5        # masa inchisa: trigger daca lista >= 5
+LOW_STAKES_TABLE_TRIGGER = 5  # 2/5: trigger doar la >= 5 mese (anormal)
+DAY_RESET_HOUR = 7            # casino inchide la 07:00 -> zi noua
 STATE_FILE = "state.json"
 TZ = ZoneInfo("Europe/Madrid")
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-# "changes" = notifica doar cand se deschide/inchide o masa (recomandat)
-# "always"  = notifica la fiecare rulare cat timp masa e deschisa
-NOTIFY_MODE = os.environ.get("NOTIFY_MODE", "changes").strip().lower()
 IS_MANUAL_RUN = os.environ.get("GITHUB_EVENT_NAME", "") == "workflow_dispatch"
+
+
+if not URL:
+    print("[!] Lipseste secretul TARGET_URL.")
+    sys.exit(1)
+
+
+def poker_day(now: datetime.datetime) -> str:
+    """Ziua de poker: 07:00 -> 07:00. Ex: 18.07 ora 01:30 apartine zilei de 17.07."""
+    return (now - datetime.timedelta(hours=DAY_RESET_HOUR)).date().isoformat()
 
 
 def in_time_window(now: datetime.datetime) -> bool:
@@ -50,7 +69,6 @@ def send_telegram(text: str) -> None:
 
 
 def fetch_page_text() -> str:
-    """Deschide pagina cu browser real (executa JavaScript) si intoarce textul."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(
@@ -60,7 +78,6 @@ def fetch_page_text() -> str:
             )
         )
         page.goto(URL, wait_until="networkidle", timeout=90_000)
-        # Timp suplimentar pentru widgetul live incarcat prin JS
         page.wait_for_timeout(8_000)
         text = page.inner_text("body")
         browser.close()
@@ -68,11 +85,7 @@ def fetch_page_text() -> str:
 
 
 def parse_texas_tables(text: str):
-    """
-    Extrage randurile din sectiunile Texas.
-    Randurile de tabel apar ca: '5,00/10,00 <tab> 1 <tab> 10'
-    Returneaza lista de dict: {section, blinds, bb, mesas, lista}
-    """
+    """Extrage randurile din sectiunile Texas: {section, blinds, sb, bb, mesas, lista}"""
     rows = []
     current_section = ""
     row_re = re.compile(
@@ -90,7 +103,6 @@ def parse_texas_tables(text: str):
                 rows.append(
                     {
                         "section": current_section,
-                        "blinds": f"{m.group(1)}/{m.group(2)}",
                         "sb": sb,
                         "bb": bb,
                         "mesas": int(m.group(3)),
@@ -98,9 +110,7 @@ def parse_texas_tables(text: str):
                     }
                 )
             continue
-        # Linie care nu e rand de tabel -> poate fi titlu de sectiune
         if re.search(r"(texas|omaha|machine|punto|sala)", line, re.IGNORECASE):
-            # Ignoram headerul de coloane si textele generice
             if "ciegas" not in line.lower() and "hold'em nl" not in line.lower():
                 current_section = line
     return rows
@@ -109,9 +119,14 @@ def parse_texas_tables(text: str):
 def load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            s = json.load(f)
     except Exception:
-        return {"open": [], "festival": False}
+        s = {}
+    return {
+        "day": s.get("day", ""),
+        "levels": s.get("levels", {}),
+        "zero_streak": s.get("zero_streak", 0),
+    }
 
 
 def save_state(state: dict) -> None:
@@ -119,10 +134,19 @@ def save_state(state: dict) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
+def fmt_num(x: float) -> str:
+    return str(int(x)) if float(x) == int(x) else str(x).replace(".", ",")
+
+
+def level_key(r) -> str:
+    return f"{r['section']}|{fmt_num(r['sb'])}/{fmt_num(r['bb'])}"
+
+
 def main() -> None:
     now = datetime.datetime.now(TZ)
     stamp = now.strftime("%d.%m %H:%M")
-    print(f"[i] Rulare la {stamp} (Madrid), mod={NOTIFY_MODE}, manual={IS_MANUAL_RUN}")
+    today = poker_day(now)
+    print(f"[i] Rulare {stamp} (Madrid), zi poker={today}, manual={IS_MANUAL_RUN}")
 
     if not IS_MANUAL_RUN and not in_time_window(now):
         print("[i] In afara intervalului 19:45-05:00. Iesire.")
@@ -136,97 +160,105 @@ def main() -> None:
             send_telegram(f"⚠️ Test: pagina nu s-a putut incarca ({e})")
         sys.exit(0)
 
-    state = load_state()
     rows = parse_texas_tables(text)
-    festival_notice = "no es posible mostrar" in text.lower()
-
-    # Mesajul de festival exista uneori in HTML-ul static chiar si cand
-    # tabelele live se incarca prin JS. Il luam in serios DOAR daca
-    # nu am gasit niciun rand de tabel Texas.
-    if not rows and festival_notice:
-        print("[i] Site-ul afiseaza mesajul de festival - date live indisponibile.")
-        if IS_MANUAL_RUN:
-            send_telegram(
-                "ℹ️ Test OK, dar site-ul afiseaza: date live indisponibile "
-                "din cauza festivalului de poker."
-            )
-        if not state.get("festival"):
-            state["festival"] = True
-            save_state(state)
+    if not rows:
+        if "no es posible mostrar" in text.lower():
+            print("[i] Date live indisponibile (mesaj festival).")
+            if IS_MANUAL_RUN:
+                send_telegram("ℹ️ Test: date live indisponibile (festival).")
+        else:
+            print("[!] Niciun rand Texas gasit.")
+            if IS_MANUAL_RUN:
+                send_telegram("⚠️ Test: nu am gasit tabelul Texas in pagina.")
         return
 
-    big_rows = [r for r in rows if r["bb"] >= MIN_BIG_BLIND]
-    low_rows = [r for r in rows if r["bb"] < MIN_BIG_BLIND]   # ex. 2/5
-    open_rows = [r for r in big_rows if r["mesas"] >= 1]
-    # Mese inchise, dar cu lista de asteptare la prag -> semnal ca se deschide curand
-    waiting_rows = [
-        r for r in big_rows if r["mesas"] == 0 and r["lista"] >= WAITLIST_THRESHOLD
-    ]
-    # 2/5: trigger doar in situatie anormala (numar mare de mese)
-    abnormal_low_rows = [
-        r for r in low_rows if r["mesas"] >= LOW_STAKES_TABLE_TRIGGER
-    ]
-    alert_rows = open_rows + waiting_rows + abnormal_low_rows
-    print(
-        f"[i] Randuri Texas: {len(rows)}; 5/10+: {len(big_rows)}; "
-        f"deschise: {len(open_rows)}; in prag de deschidere: {len(waiting_rows)}; "
-        f"2/5 anormal: {len(abnormal_low_rows)}"
-    )
+    # Ordinea de pe site: de la mic la mare
+    rows.sort(key=lambda r: (r["sb"], r["bb"], r["section"]))
+
+    state = load_state()
+    if state["day"] != today:
+        print(f"[i] Zi noua de poker ({state['day']!r} -> {today!r}): holderii se reseteaza.")
+        state = {"day": today, "levels": {}, "zero_streak": 0}
+    holders = state["levels"]
+
     for r in rows:
-        print(f"    {r['section']} | {r['blinds']} | mese={r['mesas']} lista={r['lista']}")
+        print(f"    {r['section']} | {fmt_num(r['sb'])}/{fmt_num(r['bb'])} | "
+              f"mese={r['mesas']} lista={r['lista']}")
 
-    # Semnatura include mesele si lista de asteptare pentru toate randurile
-    # relevante (deschise SAU inchise cu lista >= prag). Orice modificare
-    # (ex. lista trece de la 5 la 6) declanseaza notificare; daca nimic
-    # nu s-a schimbat, nu se trimite nimic.
-    signature = sorted(
-        f"{r['section']}|{r['blinds']}|{r['mesas']}|{r['lista']}" for r in alert_rows
-    )
-    prev_signature = state.get("open", [])
+    # --- Protectie la glitch: totul 0 mese desi azi existau mese deschise ---
+    all_zero = all(r["mesas"] == 0 for r in rows)
+    had_open_today = any(h.get("mesas", 0) > 0 for h in holders.values())
+    if all_zero and had_open_today and not IS_MANUAL_RUN:
+        state["zero_streak"] += 1
+        if state["zero_streak"] == 1:
+            print("[!] Posibil glitch pe site (totul 0). Ignor aceasta citire; "
+                  "confirm la urmatoarea rulare.")
+            save_state(state)   # doar contorul; holderii raman neatinsi
+            return
+        print("[i] A doua citire consecutiva cu totul 0 -> o consider reala.")
+    else:
+        state["zero_streak"] = 0
 
-    def _fmt_num(x: float) -> str:
-        return str(int(x)) if float(x) == int(x) else str(x).replace(".", ",")
+    # --- Evaluare triggere per nivel, fata de holderul de azi ---
+    triggered = {}   # level_key -> emoji
+    for r in rows:
+        key = level_key(r)
+        h = holders.get(key)
+        if r["bb"] >= MIN_BIG_BLIND:
+            if r["mesas"] >= 1:
+                # prima deschidere azi sau schimbare in numarul de mese
+                if h is None or h.get("mesas", 0) != r["mesas"]:
+                    triggered[key] = "🎰 "
+                # masa deschisa: lista trece intre 0 si diferit de 0
+                # (in orice directie); NU conteaza cati sunt in lista
+                elif (h.get("lista", 0) == 0) != (r["lista"] == 0):
+                    triggered[key] = "📋 "
+            else:
+                if h is not None and h.get("mesas", 0) >= 1:
+                    # era deschisa azi si acum e 0 -> inchidere
+                    triggered[key] = "❌ "
+                elif r["lista"] >= WAITLIST_THRESHOLD and (
+                    h is None
+                    or h.get("mesas") != 0
+                    or h.get("lista") != r["lista"]
+                ):
+                    # inchisa, lista la prag: noua azi sau lista schimbata
+                    triggered[key] = "⏳ "
+        else:
+            # 2/5: doar situatia anormala (multe mese), noua sau schimbata
+            if r["mesas"] >= LOW_STAKES_TABLE_TRIGGER and (
+                h is None or h.get("mesas") != r["mesas"]
+            ):
+                triggered[key] = "🔥 "
 
-    sections = {r["section"] for r in rows}
-    multi_section = len(sections) > 1
-
-    def sec_tag(r) -> str:
-        """Numele salii apare doar daca exista mai multe sectiuni Texas."""
-        if not multi_section:
-            return ""
-        t = re.sub(r"\s+", " ", r["section"].replace("|", " ")).strip()
-        t = re.sub(r"^SALA\s+", "", t, flags=re.IGNORECASE)
-        return f"{t.title()} · "
-
-    def line(r, emoji: str = "") -> str:
-        blinds = f"{_fmt_num(r['sb'])}/{_fmt_num(r['bb'])}"
-        mese = f"{r['mesas']} " + ("masa" if r["mesas"] == 1 else "mese")
-        return f"{emoji}{sec_tag(r)}{blinds} · {mese} · {r['lista']} in lista"
-
-    # Randurile de alerta, fiecare cu simbolul categoriei sale
-    body_lines = (
-        [line(r, "🎰 ") for r in open_rows]
-        + [line(r, "⏳ ") for r in waiting_rows]
-        + [line(r, "🔥 ") for r in abnormal_low_rows]
-    )
-    # Contextul 2/5 (fara emoji), doar randurile care nu sunt deja in alerta
-    context_lines = [line(r) for r in low_rows if r not in abnormal_low_rows]
+    # --- Afisare: mereu acelasi stil, snapshot complet in ordinea de pe
+    # site, FARA emoji. Triggerele decid doar DACA se trimite mesajul. ---
+    def snapshot_lines() -> list:
+        lines = []
+        for r in rows:
+            mese = f"{r['mesas']} " + ("masa" if r["mesas"] == 1 else "mese")
+            lines.append(
+                f"{fmt_num(r['sb'])}/{fmt_num(r['bb'])} · {mese} · "
+                f"{r['lista']} in lista"
+            )
+        return lines
 
     if IS_MANUAL_RUN:
-        status_lines = [line(r) for r in low_rows + big_rows]
-        if status_lines:
-            send_telegram(f"✅ Test OK · {stamp}\n" + "\n".join(status_lines))
-        else:
-            send_telegram(f"✅ Test OK · {stamp}\nTabel Texas gol (posibil pagina goala).")
-    else:
-        if alert_rows and (NOTIFY_MODE == "always" or signature != prev_signature):
-            send_telegram("\n".join(body_lines + context_lines) + f"\n{stamp}")
-        elif not alert_rows and prev_signature:
-            closing = [f"❌ 5/10+ inchise · liste sub {WAITLIST_THRESHOLD} · {stamp}"]
-            send_telegram("\n".join(closing + context_lines))
+        send_telegram(f"✅ Test OK · {stamp}\n" + "\n".join(snapshot_lines()))
+        print("[i] Rulare manuala: starea NU se salveaza.")
+        return
 
-    state["open"] = signature
-    state["festival"] = False
+    if triggered:
+        print(f"[i] Triggere: {triggered}")
+        send_telegram("\n".join(snapshot_lines()) + f"\n{stamp}")
+    else:
+        print("[i] Nicio schimbare relevanta fata de holderii de azi.")
+
+    # --- Actualizare holderi (mereu, per nivel) si salvare ---
+    for r in rows:
+        holders[level_key(r)] = {"mesas": r["mesas"], "lista": r["lista"]}
+    state["levels"] = holders
+    state["day"] = today
     save_state(state)
 
 
