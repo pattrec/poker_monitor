@@ -1,9 +1,9 @@
-name: Poker 5-10 Monitor
+name: Monitor
 
 on:
   schedule:
-    # Cron in UTC. Acopera 19:45-05:00 ora Spaniei (vara UTC+2, iarna UTC+1).
-    # Scriptul verifica singur fereastra exacta si iese daca e in afara ei.
+    # Cron in UTC. Acopera fereastra de seara; scriptul verifica singur
+    # intervalul exact si iese daca e in afara lui.
     - cron: '*/15 17-23 * * *'
     - cron: '*/15 0-4 * * *'
   workflow_dispatch: {}   # permite rulare manuala pentru test
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: poker-monitor
+  group: monitor
   cancel-in-progress: false
 
 jobs:
@@ -37,12 +37,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          NOTIFY_MODE: changes   # schimba in "always" daca vrei mesaj la fiecare 15 min cat e masa deschisa
+          TARGET_URL: ${{ secrets.TARGET_URL }}
         run: python monitor.py
 
       - name: Save state
         run: |
-          git config user.name "poker-monitor-bot"
+          git config user.name "monitor-bot"
           git config user.email "bot@users.noreply.github.com"
           git add state.json || true
           if ! git diff --cached --quiet; then
