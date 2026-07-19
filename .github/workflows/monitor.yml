@@ -6,6 +6,8 @@ on:
     # intervalul exact si iese daca e in afara lui.
     - cron: '7,22,37,52 16-23 * * *'
     - cron: '7,22,37,52 0-4 * * *'
+  repository_dispatch:
+    types: [tick]
   workflow_dispatch: {}   # permite rulare manuala pentru test
 
 permissions:
