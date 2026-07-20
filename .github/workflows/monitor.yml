@@ -4,7 +4,7 @@ on:
   schedule:
     # Cron in UTC. Acopera fereastra de seara; scriptul verifica singur
     # intervalul exact si iese daca e in afara lui.
-    - cron: '7,22,37,52 16-23 * * *'
+    - cron: '7,22,37,52 15-23 * * *'
     - cron: '7,22,37,52 0-4 * * *'
   repository_dispatch:
     types: [tick]
@@ -22,20 +22,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Verifica fereastra orara
+        id: gate
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import datetime, os
+          from zoneinfo import ZoneInfo
+          now = datetime.datetime.now(ZoneInfo("Europe/Madrid")).time()
+          manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+          in_win = now >= datetime.time(17, 55) or now <= datetime.time(5, 0)
+          print("run=" + ("true" if (manual or in_win) else "false"))
+          EOF
+
       - name: Checkout
+        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Python
+        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
         run: |
           pip install --quiet playwright requests
           playwright install --with-deps chromium
 
       - name: Run monitor
+        if: steps.gate.outputs.run == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -43,6 +59,7 @@ jobs:
         run: python monitor.py
 
       - name: Save state
+        if: steps.gate.outputs.run == 'true'
         run: |
           git config user.name "monitor-bot"
           git config user.email "bot@users.noreply.github.com"
