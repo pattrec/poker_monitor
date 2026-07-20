@@ -51,9 +51,9 @@ def poker_day(now: datetime.datetime) -> str:
 
 
 def in_time_window(now: datetime.datetime) -> bool:
-    """18:45 - 05:00 ora Spaniei."""
+    """17:55 - 05:00 ora Spaniei."""
     t = now.time()
-    return t >= datetime.time(18, 45) or t <= datetime.time(5, 0)
+    return t >= datetime.time(17, 55) or t <= datetime.time(5, 0)
 
 
 def send_telegram(text: str) -> None:
@@ -144,12 +144,12 @@ def level_key(r) -> str:
 
 def main() -> None:
     now = datetime.datetime.now(TZ)
-    stamp = now.strftime("%d.%m %H:%M")
+    stamp = now.strftime("%A %d.%m %H:%M")
     today = poker_day(now)
     print(f"[i] Rulare {stamp} (Madrid), zi poker={today}, manual={IS_MANUAL_RUN}")
 
     if not IS_MANUAL_RUN and not in_time_window(now):
-        print("[i] In afara intervalului 19:45-05:00. Iesire.")
+        print("[i] In afara intervalului 17:55-05:00. Iesire.")
         return
 
     try:
@@ -236,10 +236,10 @@ def main() -> None:
     def snapshot_lines() -> list:
         lines = []
         for r in rows:
-            mese = f"{r['mesas']} " + ("masa" if r["mesas"] == 1 else "mese")
+            tables = f"{r['mesas']} " + ("table" if r["mesas"] == 1 else "tables")
             lines.append(
-                f"{fmt_num(r['sb'])}/{fmt_num(r['bb'])} · {mese} · "
-                f"{r['lista']} in lista"
+                f"{fmt_num(r['sb'])}/{fmt_num(r['bb'])} · {tables} · "
+                f"{r['lista']} in the list"
             )
         return lines
 
