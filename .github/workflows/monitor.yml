@@ -1,11 +1,6 @@
 name: Monitor
 
 on:
-  schedule:
-    # Cron in UTC. Acopera fereastra de seara; scriptul verifica singur
-    # intervalul exact si iese daca e in afara lui.
-    - cron: '7,22,37,52 15-23 * * *'
-    - cron: '7,22,37,52 0-4 * * *'
   repository_dispatch:
     types: [tick]
   workflow_dispatch: {}   # permite rulare manuala pentru test
@@ -66,5 +61,6 @@ jobs:
           git add state.json || true
           if ! git diff --cached --quiet; then
             git commit -m "update state [skip ci]"
+            git pull --rebase -X theirs origin main || true
             git push
           fi
