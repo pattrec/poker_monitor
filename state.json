@@ -1,17 +1,17 @@
 {
-  "day": "2026-07-22",
+  "day": "2026-07-23",
   "levels": {
     "SALA PRINCIPAL | Texas|2/5": {
-      "mesas": 4,
+      "mesas": 3,
       "lista": 0
     },
     "SALA PRINCIPAL | Texas|5/10": {
-      "mesas": 0,
+      "mesas": 1,
       "lista": 0
     },
     "SALA PRINCIPAL | Texas|10/20": {
       "mesas": 0,
-      "lista": 3
+      "lista": 4
     }
   },
   "zero_streak": 0
