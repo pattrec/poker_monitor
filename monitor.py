@@ -51,9 +51,9 @@ def poker_day(now: datetime.datetime) -> str:
 
 
 def in_time_window(now: datetime.datetime) -> bool:
-    """17:55 - 05:00 ora Spaniei."""
+    """17:00 - 05:45 ora Spaniei."""
     t = now.time()
-    return t >= datetime.time(17, 55) or t <= datetime.time(5, 0)
+    return t >= datetime.time(17, 0) or t <= datetime.time(5, 45)
 
 
 def send_telegram(text: str) -> None:
