@@ -25,7 +25,7 @@ jobs:
           from zoneinfo import ZoneInfo
           now = datetime.datetime.now(ZoneInfo("Europe/Madrid")).time()
           manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-          in_win = now >= datetime.time(17, 0) or now <= datetime.time(5, 45)
+          in_win = now >= datetime.time(16, 55) or now <= datetime.time(5, 45)
           print("run=" + ("true" if (manual or in_win) else "false"))
           EOF
 
