@@ -2,11 +2,11 @@
   "day": "2026-08-23",
   "levels": {
     "SALA PRINCIPAL | Texas|5/5": {
-      "mesas": 0,
+      "mesas": 6,
       "lista": 0
     },
     "SALA PRINCIPAL | Texas|5/10": {
-      "mesas": 0,
+      "mesas": 3,
       "lista": 0
     }
   },
