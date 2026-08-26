@@ -3,11 +3,11 @@
   "levels": {
     "SALA PRINCIPAL | Texas|5/5": {
       "mesas": 12,
-      "lista": 23
+      "lista": 8
     },
     "SALA PRINCIPAL | Texas|5/10": {
       "mesas": 5,
-      "lista": 10
+      "lista": 14
     }
   },
   "zero_streak": 0
